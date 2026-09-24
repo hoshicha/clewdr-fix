@@ -12,14 +12,14 @@
 //! * Extended thinking (`thinking.type: "enabled"` + `budget_tokens`) is
 //!   deprecated on 4.6 and rejected from 4.7 onwards; adaptive thinking
 //!   (`thinking.type: "adaptive"`) is rejected on 4.5 and earlier.
-//! * Fable/Mythos always think and reject both `enabled` and `disabled`.
+//! * Fable/Mythos and Opus 5.5 always think and reject both `enabled` and `disabled`.
 //! * Thinking is off by default on every 4.x model, and on by default on the
 //!   5 series -- where `display` then defaults to `omitted`, so the reasoning
 //!   is billed but never sent to the client.
 //! * `output_config.effort` only exists from Opus 4.5 onwards, and the `xhigh`
 //!   rung only from 4.7 onwards.
-//! * Claude Opus 5 and later reject `thinking.type: "disabled"` at `xhigh` or
-//!   `max` effort.
+//! * Claude Opus 5 rejects `thinking.type: "disabled"` at `xhigh` or `max`
+//!   effort; Opus 5.5 rejects it at every effort level.
 //!
 //! Frontends such as SillyTavern send whatever their preset holds, so ClewdR
 //! rewrites the request to the nearest shape the target model accepts instead
@@ -103,8 +103,8 @@ impl ModelTraits {
         let line = model_line(&name)?;
         let generation = generation(&name)?;
 
-        // Fable/Mythos always think and expose no sampling knobs.
-        if line == ModelLine::Fable {
+        // Fable/Mythos and Opus 5.5 always think and expose no sampling knobs.
+        if line == ModelLine::Fable || (line == ModelLine::Opus && generation >= (5, 5)) {
             return Some(Self {
                 generation,
                 thinking: ThinkingSupport::AlwaysOn,
@@ -300,8 +300,9 @@ fn generation(name: &str) -> Option<(u32, u32)> {
 ///
 /// Retired ids are omitted: requests to them fail upstream, so listing them
 /// only misleads clients. Kept in sync with Anthropic's model deprecation page.
-pub const ACTIVE_MODELS: [&str; 10] = [
+pub const ACTIVE_MODELS: [&str; 11] = [
     "claude-fable-5",
+    "claude-opus-5-5",
     "claude-opus-5",
     "claude-opus-4-8",
     "claude-opus-4-7",
@@ -355,6 +356,7 @@ mod tests {
     fn parses_every_id_spelling() {
         assert_eq!(generation("claude-opus-4-6"), Some((4, 6)));
         assert_eq!(generation("claude-opus-5"), Some((5, 0)));
+        assert_eq!(generation("claude-opus-5-5"), Some((5, 5)));
         assert_eq!(generation("claude-sonnet-4-5-20250929"), Some((4, 5)));
         assert_eq!(generation("claude-3-7-sonnet-20250219"), Some((3, 7)));
         assert_eq!(generation("claude-haiku-4-5-20251001"), Some((4, 5)));
@@ -539,5 +541,48 @@ mod tests {
         let all = advertised_models().collect::<Vec<_>>();
         assert_eq!(all.len(), ACTIVE_MODELS.len() * 2);
         assert!(all.iter().all(|m| ModelTraits::of(m).is_some()));
+        assert!(all.iter().any(|m| m == "claude-opus-5-5"));
+        assert!(all.iter().any(|m| m == "claude-opus-5-5-thinking"));
+    }
+
+    #[test]
+    fn opus_5_5_removes_disabled_thinking_without_lowering_effort() {
+        let mut p = params("claude-opus-5-5");
+        p.thinking = Some(Thinking::Disabled);
+        p.output_config = Some(OutputConfig {
+            effort: Some(OutputEffort::Max),
+            format: None,
+        });
+        p.temperature = Some(0.7);
+        p.top_p = Some(0.9);
+        p.top_k = Some(40);
+
+        ModelTraits::of("claude-opus-5-5").unwrap().sanitize(&mut p);
+
+        assert!(p.thinking.is_none());
+        assert_eq!(
+            p.output_config.and_then(|c| c.effort),
+            Some(OutputEffort::Max)
+        );
+        assert_eq!(p.temperature, None);
+        assert_eq!(p.top_p, None);
+        assert_eq!(p.top_k, None);
+    }
+
+    #[test]
+    fn opus_5_5_converts_budgets_and_exposes_thinking_for_suffix() {
+        let traits = ModelTraits::of("claude-opus-5-5").unwrap();
+        let mut p = params("claude-opus-5-5");
+        p.thinking = Some(Thinking::new(8192));
+        traits.sanitize(&mut p);
+        assert!(matches!(p.thinking, Some(Thinking::Adaptive { .. })));
+
+        let (base, thinking) = split_thinking_suffix("claude-opus-5-5-thinking");
+        assert_eq!(base, "claude-opus-5-5");
+        assert!(thinking);
+        assert!(matches!(
+            traits.thinking_for_suffix(),
+            Thinking::Adaptive { display: Some(_) }
+        ));
     }
 }
