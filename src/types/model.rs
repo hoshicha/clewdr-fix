@@ -13,6 +13,8 @@
 //!   deprecated on 4.6 and rejected from 4.7 onwards; adaptive thinking
 //!   (`thinking.type: "adaptive"`) is rejected on 4.5 and earlier.
 //! * Fable/Mythos and Opus 5.5 always think and reject both `enabled` and `disabled`.
+//! * Sonnet 5.5 replaces `disabled` with `between_tools`; this setting and
+//!   Haiku 5.5's `disabled` require `high` effort or below.
 //! * Thinking is off by default on every 4.x model, and on by default on the
 //!   5 series -- where `display` then defaults to `omitted`, so the reasoning
 //!   is billed but never sent to the client.
@@ -43,6 +45,8 @@ pub const THINKING_SUFFIX: &str = "-thinking";
 enum ThinkingSupport {
     /// Thinking is always on; both `enabled` and `disabled` are rejected.
     AlwaysOn,
+    /// Adaptive thinking or `between_tools`, with no up-front thinking (Sonnet 5.5).
+    AdaptiveOrBetweenTools,
     /// Only `adaptive`; `enabled` is rejected (Claude 4.7 and later).
     AdaptiveOnly,
     /// Both modes work, `enabled` being deprecated (the Claude 4.6 generation).
@@ -114,6 +118,9 @@ impl ModelTraits {
         }
 
         let (thinking, sampling, efforts) = match generation {
+            (5, 5) if line == ModelLine::Sonnet => {
+                (ThinkingSupport::AdaptiveOrBetweenTools, false, EFFORT_FULL)
+            }
             // Claude 4.7 and later: sampling parameters and extended thinking removed.
             g if g >= (4, 7) => (ThinkingSupport::AdaptiveOnly, false, EFFORT_FULL),
             // The 4.6 generation: both thinking modes, sampling only without thinking.
@@ -150,6 +157,7 @@ impl ModelTraits {
     pub fn thinking_for_suffix(&self) -> Thinking {
         match self.thinking {
             ThinkingSupport::AlwaysOn
+            | ThinkingSupport::AdaptiveOrBetweenTools
             | ThinkingSupport::AdaptiveOnly
             | ThinkingSupport::AdaptiveOrExtended => Thinking::adaptive_summarized(),
             ThinkingSupport::ExtendedOnly => Thinking::new(DEFAULT_THINKING_BUDGET),
@@ -174,11 +182,19 @@ impl ModelTraits {
             return;
         };
         params.thinking = match (self.thinking, requested) {
-            (ThinkingSupport::AlwaysOn, Thinking::Disabled) => None,
-            // Neither line takes a budget, but the request still means "think",
+            (ThinkingSupport::AlwaysOn, Thinking::Disabled | Thinking::BetweenTools) => None,
+            (
+                ThinkingSupport::AdaptiveOrBetweenTools,
+                Thinking::Disabled | Thinking::BetweenTools,
+            ) => Some(Thinking::BetweenTools),
+            // Preserve the no-up-front-thinking intent when switching to older models.
+            (_, Thinking::BetweenTools) => Some(Thinking::Disabled),
+            // These modes take no budget, but the request still means "think",
             // so it becomes adaptive rather than being dropped.
             (
-                ThinkingSupport::AlwaysOn | ThinkingSupport::AdaptiveOnly,
+                ThinkingSupport::AlwaysOn
+                | ThinkingSupport::AdaptiveOrBetweenTools
+                | ThinkingSupport::AdaptiveOnly,
                 Thinking::Enabled { .. },
             ) => Some(Thinking::adaptive_summarized()),
             // 4.5 and earlier never learned adaptive.
@@ -191,16 +207,18 @@ impl ModelTraits {
 
     /// Drop or step down `output_config.effort` to a rung this model has.
     ///
-    /// Also resolves the Opus 5 rule that thinking cannot be switched off at
-    /// `xhigh` or `max`, by lowering the effort so the client's explicit
-    /// `disabled` survives.
+    /// Keeps disabled thinking (including Haiku 5.5) and Sonnet 5.5's
+    /// `between_tools` at `high` or below, preserving the client's intent.
     fn clamp_effort(&self, params: &mut CreateMessageParams) {
         let Some(config) = params.output_config.as_mut() else {
             return;
         };
         if let Some(requested) = config.effort {
             let ceiling = if self.generation >= (5, 0)
-                && matches!(params.thinking, Some(Thinking::Disabled))
+                && matches!(
+                    params.thinking,
+                    Some(Thinking::Disabled | Thinking::BetweenTools)
+                )
             {
                 OutputEffort::High
             } else {
@@ -232,7 +250,9 @@ impl ModelTraits {
                     matches!(params.thinking, Some(Thinking::Enabled { .. }))
                 }
                 // Unreachable: these lines have no sampling parameters at all.
-                ThinkingSupport::AlwaysOn | ThinkingSupport::AdaptiveOnly => true,
+                ThinkingSupport::AlwaysOn
+                | ThinkingSupport::AdaptiveOrBetweenTools
+                | ThinkingSupport::AdaptiveOnly => true,
             };
         if blocked {
             params.temperature = None;
@@ -300,7 +320,7 @@ fn generation(name: &str) -> Option<(u32, u32)> {
 ///
 /// Retired ids are omitted: requests to them fail upstream, so listing them
 /// only misleads clients. Kept in sync with Anthropic's model deprecation page.
-pub const ACTIVE_MODELS: [&str; 11] = [
+pub const ACTIVE_MODELS: [&str; 13] = [
     "claude-fable-5",
     "claude-opus-5-5",
     "claude-opus-5",
@@ -308,9 +328,11 @@ pub const ACTIVE_MODELS: [&str; 11] = [
     "claude-opus-4-7",
     "claude-opus-4-6",
     "claude-opus-4-5-20251101",
+    "claude-sonnet-5-5",
     "claude-sonnet-5",
     "claude-sonnet-4-6",
     "claude-sonnet-4-5-20250929",
+    "claude-haiku-5-5",
     "claude-haiku-4-5-20251001",
 ];
 
@@ -357,6 +379,8 @@ mod tests {
         assert_eq!(generation("claude-opus-4-6"), Some((4, 6)));
         assert_eq!(generation("claude-opus-5"), Some((5, 0)));
         assert_eq!(generation("claude-opus-5-5"), Some((5, 5)));
+        assert_eq!(generation("claude-sonnet-5-5"), Some((5, 5)));
+        assert_eq!(generation("claude-haiku-5-5"), Some((5, 5)));
         assert_eq!(generation("claude-sonnet-4-5-20250929"), Some((4, 5)));
         assert_eq!(generation("claude-3-7-sonnet-20250219"), Some((3, 7)));
         assert_eq!(generation("claude-haiku-4-5-20251001"), Some((4, 5)));
@@ -584,5 +608,89 @@ mod tests {
             traits.thinking_for_suffix(),
             Thinking::Adaptive { display: Some(_) }
         ));
+    }
+
+    #[test]
+    fn sonnet_5_5_preserves_no_up_front_thinking_at_supported_effort() {
+        for thinking in [Thinking::Disabled, Thinking::BetweenTools] {
+            for effort in EFFORT_FULL {
+                let mut p = params("claude-sonnet-5-5");
+                p.thinking = Some(thinking.clone());
+                p.output_config = Some(OutputConfig {
+                    effort: Some(*effort),
+                    format: None,
+                });
+                ModelTraits::of("claude-sonnet-5-5").unwrap().sanitize(&mut p);
+                assert!(matches!(p.thinking, Some(Thinking::BetweenTools)));
+                assert_eq!(
+                    p.output_config.and_then(|c| c.effort),
+                    Some((*effort).min(OutputEffort::High))
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn haiku_5_5_keeps_disabled_thinking_at_supported_effort() {
+        for effort in EFFORT_FULL {
+            let mut p = params("claude-haiku-5-5");
+            p.thinking = Some(Thinking::Disabled);
+            p.output_config = Some(OutputConfig {
+                effort: Some(*effort),
+                format: None,
+            });
+            ModelTraits::of("claude-haiku-5-5").unwrap().sanitize(&mut p);
+            assert!(matches!(p.thinking, Some(Thinking::Disabled)));
+            assert_eq!(
+                p.output_config.and_then(|c| c.effort),
+                Some((*effort).min(OutputEffort::High))
+            );
+        }
+    }
+
+    #[test]
+    fn between_tools_is_not_forwarded_to_models_that_reject_it() {
+        for model in ["claude-haiku-5-5", "claude-sonnet-5", "claude-sonnet-4-6"] {
+            let mut p = params(model);
+            p.thinking = Some(Thinking::BetweenTools);
+            ModelTraits::of(model).unwrap().sanitize(&mut p);
+            assert!(matches!(p.thinking, Some(Thinking::Disabled)), "{model}");
+        }
+        let mut p = params("claude-opus-5-5");
+        p.thinking = Some(Thinking::BetweenTools);
+        ModelTraits::of("claude-opus-5-5").unwrap().sanitize(&mut p);
+        assert!(p.thinking.is_none());
+    }
+
+    #[test]
+    fn sonnet_and_haiku_5_5_support_adaptive_thinking_and_model_discovery() {
+        let all = advertised_models().collect::<Vec<_>>();
+        for model in ["claude-sonnet-5-5", "claude-haiku-5-5"] {
+            assert!(all.iter().any(|m| m == model));
+            assert!(all.contains(&format!("{model}-thinking")));
+            let traits = ModelTraits::of(model).unwrap();
+            let mut p = params(model);
+            p.temperature = Some(0.7);
+            p.top_p = Some(0.9);
+            p.top_k = Some(40);
+            p.thinking = Some(Thinking::new(8192));
+            p.output_config = Some(OutputConfig {
+                effort: Some(OutputEffort::Max),
+                format: None,
+            });
+            traits.sanitize(&mut p);
+            assert!(matches!(p.thinking, Some(Thinking::Adaptive { .. })));
+            assert_eq!(p.temperature, None);
+            assert_eq!(p.top_p, None);
+            assert_eq!(p.top_k, None);
+            assert_eq!(
+                p.output_config.and_then(|c| c.effort),
+                Some(OutputEffort::Max)
+            );
+            assert!(matches!(
+                traits.thinking_for_suffix(),
+                Thinking::Adaptive { display: Some(_) }
+            ));
+        }
     }
 }

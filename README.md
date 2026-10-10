@@ -93,6 +93,14 @@ SillyTavern:
 
 The model-list endpoint above returns the ids ClewdR currently accepts, including a `-thinking` variant of each.
 
+Claude 5.5 model IDs include `claude-opus-5-5`, `claude-sonnet-5-5`, and
+`claude-haiku-5-5`. Their `-thinking` variants request visible thinking summaries.
+Sonnet 5.5 maps disabled thinking to `between_tools` (no up-front thinking);
+Haiku 5.5 keeps disabled thinking. Both settings cap effort at `high`.
+Legacy thinking budgets become adaptive thinking, and unsupported sampling
+parameters are removed. Sonnet 5.5 does not support forced tool choices; use
+`auto` or `none` for `tool_choice`.
+
 Any other OpenAI-compatible client — Continue, Cursor and the rest — works the same way: point its API base at `http://127.0.0.1:8484/v1/` and use the API password as the key.
 
 ## Building from Source

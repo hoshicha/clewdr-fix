@@ -341,6 +341,8 @@ pub enum Thinking {
         budget_tokens: u64,
     },
     Disabled,
+    /// Sonnet 5.5's lowest thinking setting: no thinking before the response.
+    BetweenTools,
     Adaptive {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         display: Option<String>,
@@ -1316,6 +1318,19 @@ mod tests {
                 budget_tokens: 2048
             })
         ));
+    }
+
+    #[test]
+    fn between_tools_thinking_round_trips_without_extra_fields() {
+        let body = json!({
+            "max_tokens": 1024,
+            "messages": [{ "role": "user", "content": "hi" }],
+            "model": "claude-sonnet-5-5",
+            "thinking": { "type": "between_tools" },
+        });
+        let parsed: CreateMessageParams = serde_json::from_value(body.clone()).unwrap();
+        assert!(matches!(parsed.thinking, Some(Thinking::BetweenTools)));
+        assert_eq!(serde_json::to_value(&parsed).unwrap(), body);
     }
 
     /// An explicit null and an absent field both mean "no preference".
