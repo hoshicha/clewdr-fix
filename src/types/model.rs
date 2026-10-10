@@ -218,8 +218,7 @@ impl ModelTraits {
                 && matches!(
                     params.thinking,
                     Some(Thinking::Disabled | Thinking::BetweenTools)
-                )
-            {
+                ) {
                 OutputEffort::High
             } else {
                 OutputEffort::Max
@@ -620,7 +619,9 @@ mod tests {
                     effort: Some(*effort),
                     format: None,
                 });
-                ModelTraits::of("claude-sonnet-5-5").unwrap().sanitize(&mut p);
+                ModelTraits::of("claude-sonnet-5-5")
+                    .unwrap()
+                    .sanitize(&mut p);
                 assert!(matches!(p.thinking, Some(Thinking::BetweenTools)));
                 assert_eq!(
                     p.output_config.and_then(|c| c.effort),
@@ -639,7 +640,9 @@ mod tests {
                 effort: Some(*effort),
                 format: None,
             });
-            ModelTraits::of("claude-haiku-5-5").unwrap().sanitize(&mut p);
+            ModelTraits::of("claude-haiku-5-5")
+                .unwrap()
+                .sanitize(&mut p);
             assert!(matches!(p.thinking, Some(Thinking::Disabled)));
             assert_eq!(
                 p.output_config.and_then(|c| c.effort),
